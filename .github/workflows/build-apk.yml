@@ -1,0 +1,84 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.9
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-infos
+      - run: flutter test
+
+      - name: Decode release keystore (optional)
+        if: env.HAS_KEYSTORE == 'true'
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
+          cat > android/key.properties <<EOF
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          storeFile=upload-keystore.jks
+          EOF
+
+      - name: Build split APKs
+        run: flutter build apk --release --split-per-abi
+
+      - name: Build universal APK
+        run: flutter build apk --release
+
+      - name: Rename outputs
+        run: |
+          mkdir -p dist
+          VER=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d+ -f1)
+          cd build/app/outputs/flutter-apk
+          cp app-arm64-v8a-release.apk   ../../../../dist/shatranj-$VER-arm64-v8a.apk
+          cp app-armeabi-v7a-release.apk ../../../../dist/shatranj-$VER-armeabi-v7a.apk
+          cp app-x86_64-release.apk      ../../../../dist/shatranj-$VER-x86_64.apk
+          cp app-release.apk             ../../../../dist/shatranj-$VER-universal.apk
+          echo "VER=$VER" >> $GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shatranj-apks
+          path: dist/*.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}-build{1}', env.VER, github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('Shatranj {0} (build {1})', env.VER, github.run_number) }}
+          make_latest: true
+          body: |
+            شطرنج آفلاین — Offline Chess for Android 7.0+
+
+            کدام فایل را نصب کنم؟ / Which file?
+            • arm64-v8a: تقریباً همهٔ گوشی‌های جدید / almost all modern phones
+            • armeabi-v7a: گوشی‌های قدیمی ۳۲ بیتی / older 32-bit phones
+            • universal: اگر مطمئن نیستید / if unsure (bigger file)
+
+            بدون اینترنت و بدون هیچ مجوزی. Fully offline, no permissions. GPL-3.0.
+          files: dist/*.apk
